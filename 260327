@@ -1,0 +1,175 @@
+# ============================================================
+#  Transcriptome isoform analysis
+#  Data: merged_transcriptome_hashids_with_cpm_filtered.txt
+#  Cell lines: A549 | NCI-H1975 | NCI-H358
+# ============================================================
+
+library(data.table)   # fast reading of large tables
+library(ggplot2)      # core plotting engine
+library(dplyr)        # data wrangling (filter, mutate, summarise, group_by)
+library(tidyr)        # reshaping (pivot_longer / pivot_wider)
+library(stringr)      # string operations (str_detect, str_replace, etc.)
+library(scales)       # axis helpers: comma(), log10_trans(), percent()
+library(RColorBrewer) # classic color palettes (e.g. brewer.pal())
+library(viridis)      # colorblind-friendly palettes (viridis, magma, plasma)
+library(ggpubr)       # publication-ready extras: ggarrange(), stat_compare_means()
+library(pheatmap)     # heatmaps with clustering
+library(ggrepel)      # non-overlapping text labels (geom_label_repel)
+
+
+# ── 1. READ THE FILE ──────────────────────────────────────────────────────────
+# fread() is much faster than read.table() for large files like this one
+
+df <- df <- fread("C:\\Users\\adri_\\OneDrive\\Escritorio\\CancerIsoformAtlas\\merged_transcriptome_hashids_with_cpm_filtered.txt")
+
+# Quick sanity check
+dim(df)       # rows x columns
+head(df, 3)
+colnames(df)
+
+
+# ── 2. COLUMN OVERVIEW ───────────────────────────────────────────────────────
+# isoform_id            – unique isoform identifier (gene::transcript)
+# original_transcript_id
+# hash_id               – genomic coordinate-based hash
+# reference_gene_id     – Ensembl gene ID
+# gene_name             – HGNC symbol
+# gene_type             – e.g. protein_coding
+# reference_transcript_id
+# transcript_name
+# structural_category   – full-splice_match | novel_in_catalog | novel_not_in_catalog
+# A549_counts / NCI-H1975_counts / NCI-H358_counts   – raw read counts
+# A549_cpm  / NCI-H1975_cpm  / NCI-H358_cpm          – counts per million
+
+
+# ── 3. TIDY "LONG" FORMAT FOR MULTI-CELL-LINE PLOTS ──────────────────────────
+# Reshape counts and CPM into long format; very handy for ggplot2
+
+df_long_cpm <- df %>%
+  pivot_longer(
+    cols      = ends_with("_cpm"),
+    names_to  = "cell_line",
+    values_to = "cpm"
+  ) %>%
+  mutate(cell_line = str_remove(cell_line, "_cpm"))
+
+df_long_counts <- df %>%
+  pivot_longer(
+    cols      = ends_with("_counts"),
+    names_to  = "cell_line",
+    values_to = "counts"
+  ) %>%
+  mutate(cell_line = str_remove(cell_line, "_counts"))
+
+
+# ── 4. EXAMPLE PLOTS ─────────────────────────────────────────────────────────
+
+cell_colors <- c(
+  "A549"      = "#E64B35",
+  "NCI-H1975" = "#4DBBD5",
+  "NCI-H358"  = "#00A087"
+)
+
+# ── 4a. Bar chart: isoform structural categories per cell line ────────────────
+ggplot(category_summary,
+       aes(x = structural_category, y = n, fill = cell_line)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = comma(n)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5,
+            size = 3.5) +
+  scale_fill_manual(values = cell_colors) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Expressed isoforms by structural category",
+    x     = "Structural category",
+    y     = "Number of isoforms",
+    fill  = "Cell line"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+
+# ── 4b. Density plot: CPM distribution per cell line (log10) ─────────────────
+df_long_cpm %>%
+  filter(cpm > 0) %>%
+  ggplot(aes(x = cpm, color = cell_line, fill = cell_line)) +
+  geom_density(alpha = 0.25) +
+  scale_x_log10(labels = comma) +
+  scale_color_manual(values = cell_colors) +
+  scale_fill_manual(values  = cell_colors) +
+  labs(
+    title = "CPM distribution per cell line",
+    x     = "CPM (log10 scale)",
+    y     = "Density",
+    color = "Cell line",
+    fill  = "Cell line"
+  ) +
+  theme_bw(base_size = 13)
+
+
+# ── 4c. Heatmap: top 25 isoforms by mean CPM across cell lines ───────────────
+cpm_mat <- df %>%
+  mutate(mean_cpm = (A549_cpm + `NCI-H1975_cpm` + `NCI-H358_cpm`) / 3) %>%
+  slice_max(order_by = mean_cpm, n = 25) %>%
+  select(isoform_id, A549_cpm, `NCI-H1975_cpm`, `NCI-H358_cpm`) %>%
+  tibble::column_to_rownames("isoform_id") %>%
+  as.matrix()
+
+pheatmap(
+  log1p(cpm_mat),
+  scale        = "row",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  color        = viridis(100),
+  main         = "Top 25 isoforms by mean CPM (row-scaled log1p)",
+  fontsize_row = 9      # increased from 6
+)
+
+
+# ── 4d. Scatter: A549 vs NCI-H1975 CPM (highlight full-splice matches) ────────
+df %>%
+  mutate(is_fsm = structural_category == "full-splice_match") %>%
+  ggplot(aes(x = A549_cpm + 0.01, y = `NCI-H1975_cpm` + 0.01,
+             color = is_fsm, alpha = is_fsm)) +
+  geom_point(size = 0.6) +
+  scale_x_log10(labels = comma) +
+  scale_y_log10(labels = comma) +
+  scale_color_manual(values = c("TRUE" = "#E64B35", "FALSE" = "grey70"),
+                     labels = c("TRUE" = "Full-splice match", "FALSE" = "Novel")) +
+  scale_alpha_manual(values = c("TRUE" = 0.9, "FALSE" = 0.2), guide = "none") +
+  labs(
+    title = "A549 vs NCI-H1975 isoform CPM",
+    x     = "A549 CPM (log10)",
+    y     = "NCI-H1975 CPM (log10)",
+    color = "Structural category"
+  ) +
+  theme_bw(base_size = 13)
+
+
+# ── 4e. Gene-level: total CPM per gene, top 20 genes per cell line ────────────
+gene_cpm <- df_long_cpm %>%
+  group_by(gene_name, cell_line) %>%
+  summarise(total_cpm = sum(cpm, na.rm = TRUE), .groups = "drop")
+
+top_genes <- gene_cpm %>%
+  group_by(cell_line) %>%
+  slice_max(order_by = total_cpm, n = 20) %>%
+  pull(gene_name) %>%
+  unique()
+
+gene_cpm %>%
+  filter(gene_name %in% top_genes) %>%
+  ggplot(aes(x = reorder(gene_name, total_cpm), y = total_cpm, fill = cell_line)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = cell_colors) +
+  scale_y_continuous(labels = comma) +
+  coord_flip() +
+  labs(
+    title = "Top genes by total isoform CPM",
+    x     = "Gene",
+    y     = "Total CPM (all isoforms)",
+    fill  = "Cell line"
+  ) +
+  theme_bw(base_size = 12)
+ 
